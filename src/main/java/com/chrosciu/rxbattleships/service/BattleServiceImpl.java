@@ -2,16 +2,14 @@ package com.chrosciu.rxbattleships.service;
 
 import com.chrosciu.rxbattleships.model.Field;
 import com.chrosciu.rxbattleships.model.Ship;
-import com.chrosciu.rxbattleships.model.ShipPosition;
 import com.chrosciu.rxbattleships.model.ShotResult;
 import com.chrosciu.rxbattleships.model.Stamp;
-import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.function.Tuples;
 
-import javax.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -20,52 +18,41 @@ import java.util.stream.Collectors;
 @Component
 @RequiredArgsConstructor
 public class BattleServiceImpl implements BattleService {
+
+    private final List<Ship> ships = new ArrayList<>();
+
     private final ShipPositionFluxService shipPositionFluxService;
     private final FieldFluxService fieldFluxService;
 
-    private List<Ship> ships = new ArrayList<>();
+    @Override
+    public Mono<Void> getShipsReadyMono() {
+        return shipPositionFluxService
+                .getShipPositionFlux()
+                .map(Ship::new)
+                .collectList()
+                .doOnNext(ships::addAll)
+                .then();
+    }
 
-    @Getter
-    private Mono<Void> shipsReadyMono;
-
-    @Getter
-    private Flux<Stamp> stampFlux;
-
-    @PostConstruct
-    private void init() {
-        shipsReadyMono = shipPositionFluxService.getShipPositionFlux()
-                .doOnNext(this::insertShipWithPosition).then();
-        stampFlux = fieldFluxService.getFieldFlux()
-                .map(this::getShotResultsAfterShot)
-                .takeUntil(this::allSunk)
+    @Override
+    public Flux<Stamp> getStampFlux() {
+        return fieldFluxService.getFieldFlux()
+                .flatMap(field -> Flux.fromIterable(ships)
+                        .map(ship -> Tuples.of(ship, ship.takeShot(field)))
+                        .takeUntil(tuple -> ShotResult.MISSED != tuple.getT2()) // take until the very first hit or sunk
+                        .takeLast(1) // leave only the last result for each particular field
+                        .map(tuple -> buildStamps(field, tuple.getT1(), tuple.getT2())))
+                .takeUntil(stamps -> ships.stream().allMatch(Ship::isSunk))
                 .flatMap(Flux::fromIterable);
     }
 
-    private List<Stamp> getShotResultsAfterShot(Field field) {
-        Ship affectedShip = null;
-        ShotResult affectedShipResult = ShotResult.MISSED;
-        for (Ship ship: ships) {
-            ShotResult result = ship.takeShot(field);
-            if (ShotResult.MISSED == result) {
-                continue;
-            }
-            affectedShip = ship;
-            affectedShipResult = result;
-            break;
-        }
-        if (ShotResult.SUNK == affectedShipResult) {
-            return affectedShip.getAllFields().stream()
-                    .map(f -> new Stamp(f, ShotResult.SUNK)).collect(Collectors.toList());
+    private List<Stamp> buildStamps(final Field field, final Ship ship, final ShotResult result) {
+        if (ShotResult.SUNK.equals(result)) {
+            return ship.getAllFields().stream()
+                    .map(shipField -> new Stamp(shipField, result))
+                    .collect(Collectors.toList());
         } else {
-            return Collections.singletonList(new Stamp(field, affectedShipResult));
+            return Collections.singletonList(new Stamp(field, result));
         }
-    }
-
-    private void insertShipWithPosition(ShipPosition position) {
-        ships.add(new Ship(position));
-    }
-
-    private boolean allSunk(List<Stamp> stamps) {
-        return ships.stream().allMatch(Ship::isSunk);
     }
 }
